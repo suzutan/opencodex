@@ -54,6 +54,23 @@ export interface ClaudeAdvisorContext {
   native?: NativeAdvisorPassthrough;
 }
 
+/**
+ * A fresh request-log context for one sub-dispatch. Only the turn's identity carries over: a
+ * spread copy would share the live `attempts` array (and the active attempt) with the turn, so
+ * every later row would aggregate the usage of every dispatch before it.
+ */
+function subDispatchLogContext(turn: RequestLogContext): RequestLogContext {
+  const fresh: RequestLogContext = { model: "unknown", provider: "unknown" };
+  if (turn.requestMetricsRecorder) fresh.requestMetricsRecorder = turn.requestMetricsRecorder;
+  if (turn.conversationId !== undefined) fresh.conversationId = turn.conversationId;
+  if (turn.surface !== undefined) fresh.surface = turn.surface;
+  if (turn.apiKeyId !== undefined) fresh.apiKeyId = turn.apiKeyId;
+  if (turn.admissionKind !== undefined) fresh.admissionKind = turn.admissionKind;
+  if (turn.inboundProtocol !== undefined) fresh.inboundProtocol = turn.inboundProtocol;
+  if (turn.claudeCompatibility !== undefined) fresh.claudeCompatibility = turn.claudeCompatibility;
+  return fresh;
+}
+
 function resolveAdvisorModel(spec: AdvisorToolSpec, cc: OcxConfig["claudeCode"]): string | null {
   try {
     return resolveInboundModel(stripOneMillionMarker(spec.model), cc);
@@ -88,8 +105,7 @@ export function withClaudeAdvisor(upstream: Response, ctx: ClaudeAdvisorContext)
         headers: ctx.headers,
         body: JSON.stringify(body),
       });
-      const logCtx: RequestLogContext = { ...ctx.logCtx };
-      delete logCtx.routeDecision;
+      const logCtx = subDispatchLogContext(ctx.logCtx);
       const start = Date.now();
       const requestId = nextRequestLogId(start);
       // A native Responses forward is logged by its terminal callbacks, not the stream tap below.
@@ -119,8 +135,7 @@ export function withClaudeAdvisor(upstream: Response, ctx: ClaudeAdvisorContext)
 
   const native = ctx.native;
   const dispatchNativeAdvisor = async (nativeCtx: NativeAdvisorPassthrough, body: Rec, signal: AbortSignal): Promise<Response> => {
-    const logCtx: RequestLogContext = { ...ctx.logCtx };
-    delete logCtx.routeDecision;
+    const logCtx = subDispatchLogContext(ctx.logCtx);
     const start = Date.now();
     const response = await nativeCtx.send(nativeAdvisorMessagesBody(nativeCtx.model, body), signal, {
       logCtx,

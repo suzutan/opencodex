@@ -119,7 +119,7 @@ test("a routed turn consults an aliased advisor model and continues with its adv
   }
 });
 
-function responsesFrames(items: Rec[]): string {
+function responsesFrames(items: Rec[], inputTokens = 10): string {
   const frames = [`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_1", status: "in_progress" } })}\n\n`];
   items.forEach((item, index) => {
     frames.push(`event: response.output_item.added\ndata: ${JSON.stringify({ type: "response.output_item.added", output_index: index, item })}\n\n`);
@@ -129,7 +129,7 @@ function responsesFrames(items: Rec[]): string {
     }
     frames.push(`event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", output_index: index, item })}\n\n`);
   });
-  frames.push(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", status: "completed", output: items, usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } })}\n\n`);
+  frames.push(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", status: "completed", output: items, usage: { input_tokens: inputTokens, output_tokens: 2, total_tokens: inputTokens + 2 } } })}\n\n`);
   return frames.join("");
 }
 
@@ -147,7 +147,9 @@ test("on a Responses-wire route each advisor dispatch is admitted as its own tur
         : input.some(item => item.type === "function_call_output")
           ? [message("msg_final", "Following the advice.")]
           : [{ type: "function_call", id: "fc_1", call_id: "call_adv", name: "advisor", arguments: "{}", status: "completed" }];
-      return new Response(responsesFrames(items), { headers: { "Content-Type": "text/event-stream" } });
+      // Distinct per-dispatch input sizes make any cross-row usage accumulation visible.
+      const inputTokens = body.model === "advisor" ? 300 : input.some(item => item.type === "function_call_output") ? 1100 : 1000;
+      return new Response(responsesFrames(items, inputTokens), { headers: { "Content-Type": "text/event-stream" } });
     },
   });
   const config = {
@@ -187,10 +189,16 @@ test("on a Responses-wire route each advisor dispatch is admitted as its own tur
     expect((message.content as Rec[])[1]!.content).toEqual({ type: "advisor_result", text: "Check the edge case first." });
     expect(captured.map(body => body.model)).toEqual(["main", "advisor", "main"]);
     expect((captured[2]!.input as Rec[]).at(-1)).toMatchObject({ type: "function_call_output", call_id: "call_adv", output: "Check the edge case first." });
+    // The continuation is the first iteration's input plus the call and its output, nothing more.
+    expect(captured[2]!.input).toEqual([...(captured[0]!.input as Rec[]), (captured[2]!.input as Rec[]).at(-2), (captured[2]!.input as Rec[]).at(-1)]);
     // The turn, the consultation and the continuation each keep a request-log row, including on
     // this native Responses forward, which logs through terminal callbacks instead of the tap.
     const rows = getRequestLogEntries().filter(entry => entry.surface === "claude");
     expect(rows.map(entry => entry.model).sort()).toEqual(["advisor", "main", "main"]);
+    // Each row carries only its own dispatch's usage: the continuation is not the sum of the turn.
+    expect(rows.map(entry => [entry.model, entry.usage?.inputTokens, entry.usage?.outputTokens])).toEqual([
+      ["main", 1000, 2], ["advisor", 300, 2], ["main", 1100, 2],
+    ]);
   } finally {
     releaseSpendHome();
     turnAdmissionLease.release();
@@ -292,6 +300,10 @@ async function runNativeCase(opts: {
     claudeCode: { anthropicBaseUrl: anthropic.server.url.toString().replace(/\/$/, ""), ...opts.claudeCode },
   } as OcxConfig;
   saveConfig(config);
+  const turnAdmissionLease = tryAdmitTurn();
+  if (!turnAdmissionLease) throw new Error("test turn admission unavailable");
+  const releaseSpendHome = acquireOwnedSpendHome();
+  clearRequestLogsForTests();
   try {
     const response = await handleClaudeMessages(
       new Request("http://localhost/v1/messages?beta=true", {
@@ -307,10 +319,17 @@ async function runNativeCase(opts: {
       }),
       config,
       { model: "unknown", provider: "unknown", inboundProtocol: "messages" } as RequestLogContext,
+      { requestId: "claude-advisor-native", start: Date.now(), turnAdmissionLease },
     );
     const message = await response.json() as Rec;
-    return { status: response.status, message, routed: upstream.captured, native: anthropic.captured };
+    // The turn's own row is finalized when its response body closes, after the JSON is read.
+    const claudeRows = () => getRequestLogEntries().filter(entry => entry.surface === "claude");
+    for (let tick = 0; tick < 100 && claudeRows().length < 3; tick++) await Bun.sleep(10);
+    const rows = claudeRows().map(entry => [entry.provider, entry.model, entry.usage?.inputTokens]).sort();
+    return { status: response.status, message, routed: upstream.captured, native: anthropic.captured, rows };
   } finally {
+    releaseSpendHome();
+    turnAdmissionLease.release();
     upstream.server.stop(true);
     anthropic.server.stop(true);
   }
@@ -332,6 +351,12 @@ test("a Claude advisor on the caller's sk-ant credential goes straight to Anthro
   expect(hit.body.stream).toBe(false);
   expect(JSON.stringify(hit.body.system)).toContain("stronger reviewer model");
   expect(JSON.stringify(hit.body.messages)).toContain("Fix the parser.");
+  // One row per dispatch, each with only its own usage.
+  expect(result.rows).toEqual([
+    ["anthropic-native", "claude-opus-5-5", 30],
+    ["mock", "main", 10],
+    ["mock", "main", 10],
+  ]);
 });
 
 test("an Anthropic error on the native advisor becomes the error variant with neutralized text", async () => {
