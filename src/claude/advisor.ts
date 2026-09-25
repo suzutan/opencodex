@@ -215,3 +215,65 @@ export function advisorPairFromItem(item: Rec): { id: string; resultContent: Rec
   const code = ADVISOR_ERROR_CODES.find(candidate => candidate === item.error_code) ?? "unavailable";
   return { id, resultContent: advisorResultContent({ errorCode: code }) };
 }
+
+/** Output budget for an advisor consultation sent straight to Anthropic. */
+export const NATIVE_ADVISOR_MAX_TOKENS = 8192;
+
+/**
+ * A subscription (claude.ai OAuth) credential is accepted only for requests that identify as
+ * Claude Code, which every request Claude Code itself sends does in its first system block.
+ */
+const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/**
+ * The Anthropic Messages form of an advisor consultation: the same instruction and transcript as
+ * the routed Responses body, with no tools.
+ */
+export function nativeAdvisorMessagesBody(model: string, advisorBody: Rec): Rec {
+  const texts: string[] = [];
+  for (const item of Array.isArray(advisorBody.input) ? advisorBody.input : []) {
+    if (isRec(item) && item.type === "message") texts.push(partsText(item.content));
+  }
+  return {
+    model,
+    max_tokens: NATIVE_ADVISOR_MAX_TOKENS,
+    stream: false,
+    system: [
+      { type: "text", text: CLAUDE_CODE_IDENTITY },
+      { type: "text", text: typeof advisorBody.instructions === "string" ? advisorBody.instructions : ADVISOR_SYSTEM_PROMPT },
+    ],
+    messages: [{ role: "user", content: [{ type: "text", text: texts.join("\n\n") }] }],
+  };
+}
+
+/** Drop the advisor beta from a forwarded `anthropic-beta` list; the consultation has no advisor tool. */
+export function withoutAdvisorBeta(value: string): string {
+  return value.split(",").map(entry => entry.trim()).filter(entry => entry.length > 0 && !entry.startsWith("advisor-tool-")).join(",");
+}
+
+/**
+ * Adapt an Anthropic Messages reply into the Responses JSON shape the advisor loop reads.
+ * Errors keep their status (a "prompt is too long" 400 becomes 413) and a neutralized message.
+ */
+export async function nativeAdvisorResponse(response: Response): Promise<Response> {
+  const json = (response.headers.get("content-type") ?? "").includes("json")
+    ? await response.json().catch(() => null) as unknown
+    : (await response.body?.cancel().catch(() => {}), null);
+  if (!response.ok) {
+    const error = isRec(json) && isRec(json.error) ? json.error : {};
+    const message = typeof error.message === "string" ? error.message : `anthropic error (${response.status})`;
+    const status = response.status === 400 && /prompt is too long/i.test(message) ? 413 : response.status;
+    return new Response(JSON.stringify({ error: { message: neutralizeAdvisorErrorText(message) } }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const content = isRec(json) && Array.isArray(json.content) ? json.content : [];
+  const text = content
+    .filter((block): block is Rec => isRec(block) && block.type === "text" && typeof block.text === "string")
+    .map(block => block.text as string)
+    .join("");
+  return new Response(JSON.stringify({
+    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}

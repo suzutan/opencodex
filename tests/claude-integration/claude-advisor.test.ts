@@ -4,7 +4,10 @@ import {
   advisorToolSpec,
   buildAdvisorTranscript,
   DEFAULT_ADVISOR_MAX_USES,
+  nativeAdvisorMessagesBody,
+  nativeAdvisorResponse,
   neutralizeAdvisorErrorText,
+  withoutAdvisorBeta,
 } from "../../src/claude/advisor";
 import { anthropicToResponsesTranslation } from "../../src/claude/inbound";
 import { analyzeClaudeCompatibility } from "../../src/claude/compatibility";
@@ -207,5 +210,39 @@ describe("advisor outbound blocks", () => {
       { type: "advisor_tool_result", tool_use_id: "srvtoolu_1", content: { type: "advisor_result", text: "Use a map." } },
     ]);
     expect(message.stop_reason).toBe("end_turn");
+  });
+});
+
+describe("native advisor adapter", () => {
+  test("builds a tool-less Messages body that identifies as Claude Code", () => {
+    const body = nativeAdvisorMessagesBody("claude-opus-5-5", {
+      instructions: "ADVISE",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "TRANSCRIPT" }] }],
+    });
+    expect(body).toEqual({
+      model: "claude-opus-5-5",
+      max_tokens: 8192,
+      stream: false,
+      system: [
+        { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        { type: "text", text: "ADVISE" },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "TRANSCRIPT" }] }],
+    });
+  });
+
+  test("drops only the advisor beta", () => {
+    expect(withoutAdvisorBeta("oauth-2025-04-20, advisor-tool-2026-03-01,claude-code-20250219")).toBe("oauth-2025-04-20,claude-code-20250219");
+    expect(withoutAdvisorBeta("advisor-tool-2026-03-01")).toBe("");
+  });
+
+  test("maps the Anthropic reply to the Responses shape and a too-long prompt to 413", async () => {
+    const ok = await nativeAdvisorResponse(Response.json({ content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "Advice." }] }));
+    expect(await ok.json()).toEqual({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Advice." }] }] });
+    const tooLong = await nativeAdvisorResponse(Response.json(
+      { type: "error", error: { type: "invalid_request_error", message: "prompt is too long: 250000 tokens > 200000 maximum" } },
+      { status: 400 },
+    ));
+    expect(tooLong.status).toBe(413);
   });
 });

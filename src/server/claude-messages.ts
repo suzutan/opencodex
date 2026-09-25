@@ -60,7 +60,7 @@ import {
 import { responseWithDeferredRequestLog } from "./relay";
 import { handleResponses } from "./responses";
 import { withClaudeAdvisor } from "./claude-advisor";
-import type { AdvisorToolSpec } from "../claude/advisor";
+import { withoutAdvisorBeta, type AdvisorToolSpec } from "../claude/advisor";
 import {
   isApiAuthRequired,
   isDataPlaneAdmissionSecret,
@@ -1045,11 +1045,32 @@ async function handleClaudeMessagesWithBudget(
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
   });
+  const nativeAdvisorModel = advisor
+    ? decodeFablePickerAlias(stripOneMillionMarker(advisor.model), cc)
+    : undefined;
+  const nativeAdvisor = nativeAdvisorModel !== undefined
+    && wantsNativePassthrough(req, config, requestPolicy, nativeAdvisorModel, cc)
+    ? {
+      model: nativeAdvisorModel,
+      send: (body: Rec, signal: AbortSignal, log: { logCtx: RequestLogContext; logIds?: { requestId: string; start: number } }) => {
+        const nativeHeaders = new Headers(req.headers);
+        const beta = nativeHeaders.get("anthropic-beta");
+        if (beta !== null) {
+          const filtered = withoutAdvisorBeta(beta);
+          if (filtered) nativeHeaders.set("anthropic-beta", filtered);
+          else nativeHeaders.delete("anthropic-beta");
+        }
+        const nativeReq = new Request(req.url, { method: "POST", headers: nativeHeaders, signal });
+        return anthropicNativePassthrough(nativeReq, config, log.logCtx, log.logIds, body, "/v1/messages");
+      },
+    }
+    : undefined;
   const upstream = advisor
     ? withClaudeAdvisor(firstUpstream, {
       spec: advisor, body: internalBody, cc, config, replayConfig, replayOptions, headers,
       scope: resolveAdmissionModelScope(config, logIds?.admission),
       logCtx, logged: logIds !== undefined, signal: req.signal, translatorBudget,
+      ...(nativeAdvisor ? { native: nativeAdvisor } : {}),
     })
     : firstUpstream;
   const response = logIds ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx) : upstream;

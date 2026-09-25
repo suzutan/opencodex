@@ -293,8 +293,14 @@ then continues with the advice as the call's `function_call_output`; an iteratio
 client tool ends the turn, and the pair returns in history, where `server_tool_use(advisor)` and
 its paired `advisor_tool_result` replay as `function_call` + `function_call_output`.
 
-The advisor model resolves through `resolveInboundModel` and the admission scope check, so a
-Claude id and an OpenCodex alias route like a client-selected model. A consultation failure never
+A Claude advisor model that qualifies for native Anthropic passthrough under the same
+`wantsNativePassthrough` rule as a Claude main model (Claude id, the caller's own `sk-ant-`
+credential, no alias or `modelMap` hit) bypasses routing: `src/server/claude-messages.ts` sends a
+tool-less Anthropic Messages body (`nativeAdvisorMessagesBody`) through `anthropicNativePassthrough`
+with the caller's filtered headers minus the advisor beta, logged as `anthropic-native`, and
+`nativeAdvisorResponse` adapts the reply for the loop. Every other advisor model resolves through
+`resolveInboundModel` and the admission scope check, so an OpenCodex alias routes like a
+client-selected model. A consultation failure never
 fails the turn: it becomes `advisor_tool_result_error` with one of the codes Claude Code
 recognizes, and the routed model is told the advisor was unavailable. Consultations past
 `max_uses` report `max_uses_exceeded`, after which the continuation drops the synthetic tool.

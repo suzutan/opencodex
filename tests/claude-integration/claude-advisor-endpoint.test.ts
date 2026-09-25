@@ -6,7 +6,7 @@ import { saveConfig } from "../../src/config";
 import { handleClaudeMessages } from "../../src/server/claude-messages";
 import { tryAdmitTurn } from "../../src/server/lifecycle";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
-import type { RequestLogContext } from "../../src/server/request-log";
+import { clearRequestLogsForTests, getRequestLogEntries, type RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -56,7 +56,7 @@ function mockUpstream() {
       captured.push(body);
       const messages = Array.isArray(body.messages) ? body.messages as Rec[] : [];
       let frames: string;
-      if (body.model === "advisor") {
+      if (body.model !== "main") {
         frames = chatFrames({ content: "Check the edge case first." }, "stop");
       } else if (messages.some(message => message.role === "tool")) {
         frames = chatFrames({ content: "Following the advice." }, "stop");
@@ -163,6 +163,7 @@ test("on a Responses-wire route each advisor dispatch is admitted as its own tur
   const turnAdmissionLease = tryAdmitTurn();
   if (!turnAdmissionLease) throw new Error("test turn admission unavailable");
   const releaseSpendHome = acquireOwnedSpendHome();
+  clearRequestLogsForTests();
   try {
     const response = await handleClaudeMessages(
       new Request("http://localhost/v1/messages", {
@@ -186,6 +187,10 @@ test("on a Responses-wire route each advisor dispatch is admitted as its own tur
     expect((message.content as Rec[])[1]!.content).toEqual({ type: "advisor_result", text: "Check the edge case first." });
     expect(captured.map(body => body.model)).toEqual(["main", "advisor", "main"]);
     expect((captured[2]!.input as Rec[]).at(-1)).toMatchObject({ type: "function_call_output", call_id: "call_adv", output: "Check the edge case first." });
+    // The turn, the consultation and the continuation each keep a request-log row, including on
+    // this native Responses forward, which logs through terminal callbacks instead of the tap.
+    const rows = getRequestLogEntries().filter(entry => entry.surface === "claude");
+    expect(rows.map(entry => entry.model).sort()).toEqual(["advisor", "main", "main"]);
   } finally {
     releaseSpendHome();
     turnAdmissionLease.release();
@@ -241,4 +246,123 @@ test("a Claude main model on native passthrough forwards the advisor tool untouc
   } finally {
     anthropic.stop(true);
   }
+});
+
+interface NativeCapture { url: string; headers: Headers; body: Rec }
+
+function mockAnthropic(reply: () => Response) {
+  const captured: NativeCapture[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      captured.push({ url: req.url, headers: req.headers, body: await req.json() as Rec });
+      return reply();
+    },
+  });
+  return { server, captured };
+}
+
+const anthropicAdvice = () => Response.json({
+  id: "msg_adv", type: "message", role: "assistant", model: "claude-opus-5-5",
+  content: [{ type: "text", text: "Native: check the edge case first." }],
+  stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 30, output_tokens: 8 },
+});
+
+const SUBSCRIPTION_HEADERS = {
+  "content-type": "application/json",
+  "anthropic-version": "2023-06-01",
+  "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,advisor-tool-2026-03-01",
+  authorization: "Bearer sk-ant-oat01-tst",
+};
+
+async function runNativeCase(opts: {
+  advisorModel: string;
+  headers: Record<string, string>;
+  claudeCode?: Record<string, unknown>;
+  anthropicReply?: () => Response;
+}) {
+  const upstream = mockUpstream();
+  const anthropic = mockAnthropic(opts.anthropicReply ?? anthropicAdvice);
+  const config = {
+    port: 0,
+    defaultProvider: "mock",
+    providers: {
+      mock: { adapter: "openai-chat", baseUrl: `${upstream.server.url.toString().replace(/\/$/, "")}/v1`, apiKey: "k", allowPrivateNetwork: true },
+    },
+    claudeCode: { anthropicBaseUrl: anthropic.server.url.toString().replace(/\/$/, ""), ...opts.claudeCode },
+  } as OcxConfig;
+  saveConfig(config);
+  try {
+    const response = await handleClaudeMessages(
+      new Request("http://localhost/v1/messages?beta=true", {
+        method: "POST",
+        headers: opts.headers,
+        body: JSON.stringify({
+          model: "mock/main",
+          max_tokens: 256,
+          stream: false,
+          tools: [{ type: "advisor_20260301", name: "advisor", model: opts.advisorModel }],
+          messages: [{ role: "user", content: "Fix the parser." }],
+        }),
+      }),
+      config,
+      { model: "unknown", provider: "unknown", inboundProtocol: "messages" } as RequestLogContext,
+    );
+    const message = await response.json() as Rec;
+    return { status: response.status, message, routed: upstream.captured, native: anthropic.captured };
+  } finally {
+    upstream.server.stop(true);
+    anthropic.server.stop(true);
+  }
+}
+
+test("a Claude advisor on the caller's sk-ant credential goes straight to Anthropic", async () => {
+  const result = await runNativeCase({ advisorModel: "claude-opus-5-5[1m]", headers: SUBSCRIPTION_HEADERS });
+  expect(result.status).toBe(200);
+  const content = result.message.content as Rec[];
+  expect(content[1]!.content).toEqual({ type: "advisor_result", text: "Native: check the edge case first." });
+  expect(result.routed.map(body => body.model)).toEqual(["main", "main"]);
+  expect(result.native).toHaveLength(1);
+  const hit = result.native[0]!;
+  expect(new URL(hit.url).pathname + new URL(hit.url).search).toBe("/v1/messages?beta=true");
+  expect(hit.headers.get("authorization")).toBe("Bearer sk-ant-oat01-tst");
+  expect(hit.headers.get("anthropic-beta")).toBe("claude-code-20250219,oauth-2025-04-20");
+  expect(hit.body.model).toBe("claude-opus-5-5");
+  expect(hit.body.tools).toBeUndefined();
+  expect(hit.body.stream).toBe(false);
+  expect(JSON.stringify(hit.body.system)).toContain("stronger reviewer model");
+  expect(JSON.stringify(hit.body.messages)).toContain("Fix the parser.");
+});
+
+test("an Anthropic error on the native advisor becomes the error variant with neutralized text", async () => {
+  const result = await runNativeCase({
+    advisorModel: "claude-opus-5-5",
+    headers: SUBSCRIPTION_HEADERS,
+    anthropicReply: () => Response.json(
+      { type: "error", error: { type: "rate_limit_error", message: "The advisor tool is not available" } },
+      { status: 429 },
+    ),
+  });
+  expect(result.status).toBe(200);
+  expect((result.message.content as Rec[])[1]!.content).toEqual({ type: "advisor_tool_result_error", error_code: "too_many_requests" });
+  expect(JSON.stringify(result.message)).not.toContain("advisor tool is not available");
+});
+
+test("a Claude advisor id claimed by modelMap stays on the routed path", async () => {
+  const result = await runNativeCase({
+    advisorModel: "claude-opus-5-5",
+    headers: SUBSCRIPTION_HEADERS,
+    claudeCode: { modelMap: { "claude-opus-5-5": "mock/advisor" } },
+  });
+  expect(result.native).toHaveLength(0);
+  expect(result.routed.map(body => body.model)).toEqual(["main", "advisor", "main"]);
+});
+
+test("a Claude advisor without an sk-ant caller credential stays on the routed path", async () => {
+  const result = await runNativeCase({
+    advisorModel: "claude-opus-5-5",
+    headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": "placeholder" },
+  });
+  expect(result.native).toHaveLength(0);
+  expect(result.routed.map(body => body.model)).toEqual(["main", "claude-opus-5-5", "main"]);
 });

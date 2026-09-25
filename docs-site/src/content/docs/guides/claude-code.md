@@ -760,8 +760,13 @@ main model is routed, OpenCodex emulates it: the routed model sees an `advisor` 
 parameters, and when it calls it the proxy sends a text transcript of the conversation to the
 advisor model, streams the result back as the `server_tool_use` + `advisor_tool_result` blocks
 Claude Code displays, and continues the routed model with the advice. The advisor model can be a
-Claude id or an OpenCodex model such as `ocx-claude-<provider>--<model>`; it is routed like any
-model you select, including API-key model scopes.
+Claude id or an OpenCodex model such as `ocx-claude-<provider>--<model>`.
+
+- A Claude advisor (`/advisor opus`, `/advisor fable`) goes straight to Anthropic with your own
+  Claude Code credential, under the same rule as [native Claude passthrough](#native-claude-passthrough-subscription-pierce):
+  a claude.ai login or `sk-ant-` key, and no `modelMap` entry or alias for that id.
+- Any other advisor model, including a Claude id mapped by `modelMap`, is routed like any model
+  you select, including API-key model scopes.
 
 - The advisor reads a text rendering of the conversation. Images and files appear as placeholders.
 - Consultations per request follow the tool's `max_uses` (default 3). A failed or over-budget
