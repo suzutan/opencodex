@@ -59,6 +59,8 @@ import {
 } from "./request-log-conversation";
 import { responseWithDeferredRequestLog } from "./relay";
 import { handleResponses } from "./responses";
+import { withClaudeAdvisor } from "./claude-advisor";
+import type { AdvisorToolSpec } from "../claude/advisor";
 import {
   isApiAuthRequired,
   isDataPlaneAdmissionSecret,
@@ -727,6 +729,7 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
+  let advisor: AdvisorToolSpec | undefined;
   let effortOverride: string | null = null;
   let effortRow: ParsedEffortRowId | null = null;
   let fastRow: ParsedFastRowId | null = null;
@@ -841,6 +844,7 @@ async function handleClaudeMessagesWithBudget(
     if (fastRow) internalBody.service_tier = "priority";
     translatorBudget.chargeRetained(jsonUtf8Bytes(internalBody), { kind: "request_copies" });
     cacheKeySource = translation.cacheKeySource;
+    advisor = translation.advisor;
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
     const unavailable = err instanceof DesktopModelMappingUnavailableError;
@@ -1014,12 +1018,12 @@ async function handleClaudeMessagesWithBudget(
     nativeLogged = true;
     addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, meta);
   };
-  const upstream = await handleResponses(internalReq, buildClaudeReplayConfig(config), logCtx, {
+  const replayConfig = buildClaudeReplayConfig(config);
+  const replayOptions = {
     // Routing keeps Claude-only sidecar overrides; admission policy must follow the live owner.
     codexAuthPolicy: config,
     ...(logIds?.admission ? { admission: logIds.admission } : {}),
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
-    abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",
     // The body is Responses-shaped by now, but the client spoke Anthropic Messages.
     // Without this the replay would look native and a Responses-scoped wire default
@@ -1032,11 +1036,22 @@ async function handleClaudeMessagesWithBudget(
     // Claude's internal stored-main enrichment is not an original caller credential.
     nativeCallerAuth: null,
     callerDirectAuth: null,
+  } as const;
+  const firstUpstream = await handleResponses(internalReq, replayConfig, logCtx, {
+    ...replayOptions,
+    abortSignal: req.signal,
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
   });
+  const upstream = advisor
+    ? withClaudeAdvisor(firstUpstream, {
+      spec: advisor, body: internalBody, cc, config, replayConfig, replayOptions, headers,
+      scope: resolveAdmissionModelScope(config, logIds?.admission),
+      logCtx, logged: logIds !== undefined, signal: req.signal, translatorBudget,
+    })
+    : firstUpstream;
   const response = logIds ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx) : upstream;
 
   if (!response.ok) {

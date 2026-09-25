@@ -1,5 +1,6 @@
 import { isClaudeWebSearchToolName } from "./outbound";
 import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
+import { advisorFunctionTool, isAdvisorToolType } from "./advisor";
 
 export function systemToInstructions(system: unknown): string | undefined {
   if (typeof system === "string") return system.length > 0 ? system : undefined;
@@ -21,6 +22,12 @@ export function toolsToResponses(tools: unknown): Rec[] | undefined {
     const type = typeof raw.type === "string" ? raw.type : "";
     if (type.startsWith("web_search")) {
       out.push({ type: "web_search" }); // hosted sidecar path
+      continue;
+    }
+    if (isAdvisorToolType(type)) {
+      // Emulated server tool: the routed model calls a synthetic function and the proxy runs
+      // the consultation (src/claude/advisor-loop.ts).
+      out.push(advisorFunctionTool());
       continue;
     }
     if (typeof raw.name === "string" && raw.name.length > 0 && isRec(raw.input_schema)) {

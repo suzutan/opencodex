@@ -21,6 +21,7 @@ import { stabilizeClaudeInstructionsForPromptCache } from "./inbound-cache-stabi
 import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 import { inlineDocumentMarker } from "../responses/inline-document";
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
+import { ADVISOR_TOOL_NAME, advisorOutputText, advisorToolSpec, type AdvisorToolSpec } from "./advisor";
 
 
 
@@ -275,6 +276,25 @@ function assistantMessageToItems(content: unknown, input: Rec[], budget: Transla
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
       }
+      // An emulated advisor consultation replays as the function call/output pair the routed
+      // model produced it from. Other server tools keep no routed history.
+      case "server_tool_use": {
+        if (raw.name !== ADVISOR_TOOL_NAME || typeof raw.id !== "string" || raw.id.length === 0) break;
+        // An unanswered call would reach the routed model as a function_call with no output.
+        const id = raw.id;
+        if (!content.some(block => isRec(block) && block.type === "advisor_tool_result" && block.tool_use_id === id)) break;
+        flush();
+        input.push({ type: "function_call", call_id: raw.id, name: ADVISOR_TOOL_NAME, arguments: "{}" });
+        break;
+      }
+      case "advisor_tool_result": {
+        const callId = raw.tool_use_id;
+        if (typeof callId !== "string" || callId.length === 0) break;
+        if (!content.some(block => isRec(block) && block.type === "server_tool_use" && block.name === ADVISOR_TOOL_NAME && block.id === callId)) break;
+        flush();
+        input.push({ type: "function_call_output", call_id: callId, output: advisorOutputText(raw.content) });
+        break;
+      }
       case "thinking": {
         flush();
         const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
@@ -324,6 +344,8 @@ export type ClaudeCacheKeySource = "metadata" | "system" | null;
 export interface ClaudeInboundTranslation {
   body: Rec;
   cacheKeySource: ClaudeCacheKeySource;
+  /** Advisor server tool the client attached, kept out of the wire body like cacheKeySource. */
+  advisor?: AdvisorToolSpec;
 }
 
 /**
@@ -501,5 +523,6 @@ function translateAnthropicRequest(
     body.reasoning = reasoning;
   }
 
-  return { body, cacheKeySource };
+  const advisor = advisorToolSpec(raw.tools);
+  return { body, cacheKeySource, ...(advisor ? { advisor } : {}) };
 }

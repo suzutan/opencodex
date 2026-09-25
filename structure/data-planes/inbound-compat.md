@@ -277,6 +277,35 @@ Instruction notice extraction scans fence ranges once and walks original lines b
 a decreasing cursor. It accepts exactly one ASCII space inside the token notice, preserves
 unmatched prefix bytes, and does not repeatedly scan or copy shrinking prompt prefixes.
 
+## Claude advisor emulation
+
+A translated Claude Messages turn whose `tools` carry an `advisor_<date>` server tool is served by
+an emulated advisor. `src/claude/inbound-content-options.ts` replaces the server tool with a
+parameterless `advisor` function, and `src/claude/inbound.ts` reports the advisor model and
+`max_uses` (default 3) beside the wire body, never inside it. `src/server/claude-advisor.ts` wraps
+the first iteration's Responses stream in `src/claude/advisor-loop.ts`. Every frame passes through
+live except the `advisor` function call. When an iteration completes with that call, the loop
+renders the turn as a text transcript (`src/claude/advisor.ts`), sends it with an advisor-role
+instruction and no tools to the advisor model through `handleResponses`, and emits one internal
+`advisor_call` output item. `src/claude/outbound.ts` translates that item into the
+`server_tool_use` + `advisor_tool_result` pair in both the SSE and the JSON path. The routed model
+then continues with the advice as the call's `function_call_output`; an iteration that also calls a
+client tool ends the turn, and the pair returns in history, where `server_tool_use(advisor)` and
+its paired `advisor_tool_result` replay as `function_call` + `function_call_output`.
+
+The advisor model resolves through `resolveInboundModel` and the admission scope check, so a
+Claude id and an OpenCodex alias route like a client-selected model. A consultation failure never
+fails the turn: it becomes `advisor_tool_result_error` with one of the codes Claude Code
+recognizes, and the routed model is told the advisor was unavailable. Consultations past
+`max_uses` report `max_uses_exceeded`, after which the continuation drops the synthetic tool.
+Relayed error text never contains the phrases that make Claude Code disable the advisor for the
+process. The final terminal frame keeps the last iteration's input usage and sums output tokens
+across iterations. Native Anthropic passthrough forwards the advisor tool untouched, and
+`claudeCode.compatibility` classifies it as the tolerated `advisor_tool` feature.
+`buildClaudeEnv` in `src/cli/claude.ts` exports `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1`
+on routed launches unless the user set it, because Claude Code otherwise attaches the tool only
+for models ranked in its built-in catalog.
+
 ## Claude skill marker path bound
 
 `src/claude/inbound.ts` examines at most 4,097 characters after the skill base-directory

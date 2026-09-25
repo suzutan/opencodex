@@ -77,6 +77,7 @@ ocx claude
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<port>` |
 | `ANTHROPIC_AUTH_TOKEN` | Only when the proxy requires an API key — otherwise it is NOT set, so your claude.ai login (subscription + connectors) stays active |
 | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1` (native `/model` picker discovery) |
+| `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | `1` (lets Claude Code attach the advisor tool to gateway models; see [Advisor on routed models](#advisor-on-routed-models)) |
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Auto-context compaction threshold (default `829800`); only injected when auto-context is enabled |
 | `ANTHROPIC_MODEL` | `claudeCode.model` (optional) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claudeCode.tierModels.haiku ?? claudeCode.smallFastModel` (optional; legacy `ANTHROPIC_SMALL_FAST_MODEL` too) |
@@ -751,6 +752,25 @@ on the schema to reject a malformed argument.
 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`,
 413 `request_too_large`, 429 `rate_limit_error`, 504 `timeout_error`, 529 `overloaded_error`,
 other 5xx `api_error`. `Retry-After` is preserved.
+
+## Advisor on routed models
+
+Claude Code's advisor (`/advisor <model>` or `--advisor <model>`) is a server-side tool. When the
+main model is routed, OpenCodex emulates it: the routed model sees an `advisor` function with no
+parameters, and when it calls it the proxy sends a text transcript of the conversation to the
+advisor model, streams the result back as the `server_tool_use` + `advisor_tool_result` blocks
+Claude Code displays, and continues the routed model with the advice. The advisor model can be a
+Claude id or an OpenCodex model such as `ocx-claude-<provider>--<model>`; it is routed like any
+model you select, including API-key model scopes.
+
+- The advisor reads a text rendering of the conversation. Images and files appear as placeholders.
+- Consultations per request follow the tool's `max_uses` (default 3). A failed or over-budget
+  consultation shows as "Advisor unavailable" in Claude Code and the turn continues.
+- With a Claude main model on native passthrough, the request reaches Anthropic unchanged.
+
+Claude Code attaches the advisor only to models ranked in its built-in catalog, so `ocx claude`
+sets `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1` on routed launches. Export
+`CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=0` to keep Claude Code's built-in model gating.
 
 ## Prompt caching and token usage
 

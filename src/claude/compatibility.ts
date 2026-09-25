@@ -10,6 +10,8 @@ const FEATURES = {
   thinking_replay: true,
   documents: true,
   web_search_tool: true,
+  // Emulated by the proxy (src/claude/advisor-loop.ts); the advisor sees a text transcript.
+  advisor_tool: false,
   tool_search: true,
   tool_reference: true,
   deferred_tools: true,
@@ -107,6 +109,7 @@ function detectFeatures(body: unknown, anthropicBeta?: string): Set<ClaudeFeatur
       if (type === undefined || type === "function" || type === "custom") continue;
       if (type === "mcp_toolset") codes.add("mcp_tool");
       else if (typeof type === "string" && /^web_search_\d{8}$/.test(type)) codes.add("web_search_tool");
+      else if (typeof type === "string" && /^advisor_\d{8}$/.test(type)) codes.add("advisor_tool");
       else if (typeof type === "string" && /^tool_search(?:_tool_(?:regex|bm25))?(?:_\d{8})?$/.test(type)) codes.add("tool_search");
       else if (typeof type === "string" && /^code_execution_\d{8}$/.test(type)) codes.add("code_execution");
       else if (typeof type === "string" && /^computer(?:_toolset)?_\d{8}$/.test(type)) codes.add("computer_use");
@@ -130,6 +133,7 @@ function detectFeatures(body: unknown, anthropicBeta?: string): Set<ClaudeFeatur
       case "tool_reference": codes.add("tool_reference"); break;
       case "tool_search_tool_result": codes.add("tool_search"); break;
       case "web_search_tool_result": codes.add("web_search_tool"); break;
+      case "advisor_tool_result": codes.add("advisor_tool"); break;
       case "code_execution_tool_result":
       case "bash_code_execution_tool_result":
       case "text_editor_code_execution_tool_result": codes.add("code_execution"); break;
@@ -144,6 +148,7 @@ function detectFeatures(body: unknown, anthropicBeta?: string): Set<ClaudeFeatur
           case "tool_search_tool_regex":
           case "tool_search_tool_bm25": codes.add("tool_search"); break;
           case "web_search": codes.add("web_search_tool"); break;
+          case "advisor": codes.add("advisor_tool"); break;
           case "code_execution": codes.add("code_execution"); break;
           case "computer": codes.add("computer_use"); break;
           default: codes.add("server_tool");

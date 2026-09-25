@@ -885,3 +885,21 @@ describe("ocx claude tool-search deferral (#4838)", () => {
     expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
   });
 });
+
+describe("ocx claude advisor flag", () => {
+  const FLAG = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL";
+
+  test("a routed launch enables the advisor tool for gateway-discovered models", () => {
+    expect(buildClaudeEnv(cfg(), 10100, {})[FLAG]).toBe("1");
+  });
+
+  test("an exported value wins, including an explicit opt-out", () => {
+    expect(buildClaudeEnv(cfg(), 10100, { [FLAG]: "0" })[FLAG]).toBe("0");
+  });
+
+  test("a native fallback launch does not gain the flag", () => {
+    expect(buildNativeClaudeEnv(cfg(), {})[FLAG]).toBeUndefined();
+    // A user's own export is theirs to keep on a native session too.
+    expect(buildNativeClaudeEnv(cfg(), { [FLAG]: "1" })[FLAG]).toBe("1");
+  });
+});

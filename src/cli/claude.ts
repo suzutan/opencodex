@@ -338,6 +338,12 @@ export function buildClaudeEnv(
   // Connectors still work because they check OAuth state ($o()), not base URL (Gd()).
   // Native /model picker discovery ("From gateway", Claude Code >= 2.1.129).
   setDefault("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+  // Advisor (server tool advisor_20260301). Claude Code attaches it only for base models
+  // ranked in its built-in catalog, which gateway-discovered models never are; this flag
+  // skips that check, and the proxy emulates the tool on routed turns
+  // (src/claude/advisor-loop.ts). A user export, including =0, still wins. The native
+  // launch env is built from `base` without this default.
+  setDefault("CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL", "1");
   // Host-managed routing guard (devlog 260720_claude_authmode_persist/020): with
   // this flag in the spawn env, Claude Code strips provider-managed vars
   // (ANTHROPIC_BASE_URL/AUTH_TOKEN/API_KEY, model slots) from settings-sourced

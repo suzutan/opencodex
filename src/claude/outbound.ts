@@ -21,6 +21,7 @@ import {
 } from "../lib/translator-budget";
 import { sseFieldOffset, sseFieldValue } from "../lib/sse-decoder";
 import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../responses/reasoning-envelope";
+import { ADVISOR_CALL_ITEM_TYPE, ADVISOR_TOOL_NAME, advisorPairFromItem } from "./advisor";
 
 type Rec = Record<string, unknown>;
 
@@ -602,6 +603,30 @@ export function responsesSseToAnthropicSse(
               if (pair.completed) webSearchRequests++;
               break;
             }
+            // Emulated advisor (src/claude/advisor-loop.ts): the same server-tool pair shape,
+            // with the consultation result carried whole on the result block's start.
+            if (item.type === ADVISOR_CALL_ITEM_TYPE) {
+              ensureStarted();
+              closeOpenBlock();
+              const pair = advisorPairFromItem(item);
+              const toolIndex = blockIndex++;
+              emit("content_block_start", {
+                type: "content_block_start", index: toolIndex,
+                content_block: { type: "server_tool_use", id: pair.id, name: ADVISOR_TOOL_NAME, input: {} },
+              });
+              emit("content_block_delta", {
+                type: "content_block_delta", index: toolIndex,
+                delta: { type: "input_json_delta", partial_json: "{}" },
+              });
+              emit("content_block_stop", { type: "content_block_stop", index: toolIndex });
+              const resultIndex = blockIndex++;
+              emit("content_block_start", {
+                type: "content_block_start", index: resultIndex,
+                content_block: { type: "advisor_tool_result", tool_use_id: pair.id, content: pair.resultContent },
+              });
+              emit("content_block_stop", { type: "content_block_stop", index: resultIndex });
+              break;
+            }
             // Close the matching open block (message/reasoning items close implicitly on
             // the next block; function_call items must close here so tool input parses).
             if (open && open.kind === "tool_use" && item.type === "function_call") {
@@ -925,6 +950,12 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string, tr
         content.push({ type: "server_tool_use", id: pair.id, name: "web_search", input: pair.input });
         content.push({ type: "web_search_tool_result", tool_use_id: pair.id, content: pair.resultContent });
         if (pair.completed) webSearchRequests++;
+        break;
+      }
+      case ADVISOR_CALL_ITEM_TYPE: {
+        const pair = advisorPairFromItem(raw);
+        content.push({ type: "server_tool_use", id: pair.id, name: ADVISOR_TOOL_NAME, input: {} });
+        content.push({ type: "advisor_tool_result", tool_use_id: pair.id, content: pair.resultContent });
         break;
       }
       default:
