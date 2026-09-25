@@ -132,18 +132,23 @@ async function readAdvisorAnswer(response: Response, budget: TranslatorBudget, s
   const contentType = response.headers.get("content-type") ?? "";
   let text = "";
   if (contentType.includes("text/event-stream") && response.body) {
+    let settled = false;
+    let failure: AdvisorOutcome | null = null;
     for await (const event of decodeServerSentEvents(response.body, { translatorBudget: budget, signal })) {
+      if (settled) continue; // drain to EOF, as in the main loop
       if (event.event === "response.output_text.delta") {
         const data = parse(event.data);
         if (data && typeof data.delta === "string") text += data.delta;
       } else if (event.event === "response.failed") {
         const data = parse(event.data);
         const error = data && isRec(data.response) && isRec(data.response.error) ? data.response.error : {};
-        return { errorCode: typeof error.status === "number" ? errorCodeForStatus(error.status) : "unavailable" };
+        failure = { errorCode: typeof error.status === "number" ? errorCodeForStatus(error.status) : "unavailable" };
+        settled = true;
       } else if (event.event === "response.completed" || event.event === "response.incomplete") {
-        break;
+        settled = true;
       }
     }
+    if (failure) return failure;
   } else {
     const json = parse(await response.text());
     const output = json && Array.isArray(json.output) ? json.output : [];
@@ -221,10 +226,13 @@ export function runAdvisorLoop(deps: AdvisorLoopDeps): ReadableStream<Uint8Array
       if (!current.body) return;
       for await (const event of decodeServerSentEvents(current.body, { translatorBudget, signal })) {
         const name = event.event ?? "";
+        // Drain to EOF after the terminal frame: cancelling the body instead would read as a
+        // client cancel to the dispatch it came from.
+        if (terminal) continue;
         if (iteration > 1 && (name === "response.created" || name === "response.in_progress")) continue;
         if (TERMINAL_EVENTS.has(name)) {
           terminal = { event: name, data: parse(event.data) ?? {} };
-          break;
+          continue;
         }
         if (ITEM_EVENTS.has(name)) {
           const data = parse(event.data) ?? {};
